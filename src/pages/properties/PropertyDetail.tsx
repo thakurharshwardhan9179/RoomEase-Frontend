@@ -4,19 +4,18 @@ import {
   Building2,
   Camera,
   Check,
-  ChevronDown,
-  ChevronUp,
+  ChevronRight,
   Edit3,
   Eye,
   Image as ImageIcon,
   Loader2,
   MapPin,
-  Maximize2,
   Pencil,
   Plus,
   QrCode,
   RefreshCw,
   Sparkles,
+  Star,
   Trash2,
   Upload,
   Users,
@@ -74,6 +73,54 @@ type GalleryTarget = {
 };
 
 type GalleryCache = Record<string, PropertyImage[]>;
+type CoverMap = Record<string, string>;
+
+const COVER_STORAGE_KEY = "roomease:gallery-covers";
+
+function readCovers(): CoverMap {
+  try {
+    const raw = localStorage.getItem(COVER_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as CoverMap) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCovers(map: CoverMap) {
+  try {
+    localStorage.setItem(
+      COVER_STORAGE_KEY,
+      JSON.stringify(map),
+    );
+  } catch {
+    /* ignore storage errors */
+  }
+}
+
+function pickCover(
+  images: PropertyImage[],
+  coverId?: string,
+): PropertyImage | undefined {
+  if (!images.length) return undefined;
+  return (
+    images.find(
+      (img) => img.propertyImageId === coverId,
+    ) ?? images[0]
+  );
+}
+
+// Room gallery me bed ki photos, property gallery me room/bed ki photos na aaye
+function scopeImages(
+  scope: GalleryScope,
+  images: PropertyImage[] | null | undefined,
+): PropertyImage[] {
+  return (images ?? []).filter((img) => {
+    const a = img as any;
+    if (scope === "property") return !a.roomId && !a.bedId;
+    if (scope === "room") return !a.bedId;
+    return true;
+  });
+}
 
 function apiError(error: any, fallback: string) {
   return (
@@ -109,11 +156,23 @@ function resolveImageUrl(imageUrl: string) {
   }
 }
 
+function cssUrl(url: string) {
+  return `url("${url.replace(/"/g, "%22")}")`;
+}
+
 function galleryKey(
   scope: GalleryScope,
   id: string,
 ) {
   return `${scope}:${id}`;
+}
+
+function targetKey(target: GalleryTarget) {
+  if (target.scope === "bed" && target.bedId)
+    return galleryKey("bed", target.bedId);
+  if (target.scope === "room" && target.roomId)
+    return galleryKey("room", target.roomId);
+  return galleryKey("property", target.propertyId);
 }
 
 function formatGalleryDate(value?: string | null) {
@@ -179,8 +238,12 @@ export default function PropertyDetail() {
   const [roomImages, setRoomImages] =
     useState<GalleryCache>({});
 
-  const [roomImagesLoading, setRoomImagesLoading] =
-    useState<Record<string, boolean>>({});
+  const [bedImages, setBedImages] =
+    useState<GalleryCache>({});
+
+  const [covers, setCovers] = useState<CoverMap>(
+    () => readCovers(),
+  );
 
   const [galleryTarget, setGalleryTarget] =
     useState<GalleryTarget | null>(null);
@@ -193,6 +256,17 @@ export default function PropertyDetail() {
 
   const [galleryError, setGalleryError] =
     useState("");
+
+  const setCover = (
+    key: string,
+    imageId: string,
+  ) => {
+    setCovers((prev) => {
+      const next = { ...prev, [key]: imageId };
+      writeCovers(next);
+      return next;
+    });
+  };
 
   const load = async () => {
     if (!propertyId) return;
@@ -213,7 +287,10 @@ export default function PropertyDetail() {
       try {
         setPropertyImagesLoading(true);
         setPropertyImages(
-          await getPropertyImages(propertyId),
+          scopeImages(
+            "property",
+            await getPropertyImages(propertyId),
+          ),
         );
       } catch (galleryErr) {
         console.error(
@@ -224,6 +301,57 @@ export default function PropertyDetail() {
       } finally {
         setPropertyImagesLoading(false);
       }
+
+      const roomsList = propertyData?.rooms ?? [];
+      const bedsList = roomsList.flatMap(
+        (r) => r.beds ?? [],
+      );
+
+      void Promise.all(
+        roomsList.map(async (r) => {
+          try {
+            const imgs = scopeImages(
+              "room",
+              await getRoomImages(r.roomId),
+            );
+            return [galleryKey("room", r.roomId), imgs] as const;
+          } catch {
+            return [
+              galleryKey("room", r.roomId),
+              [] as PropertyImage[],
+            ] as const;
+          }
+        }),
+      ).then((entries) => {
+        setRoomImages((prev) => {
+          const next = { ...prev };
+          for (const [k, imgs] of entries) next[k] = imgs;
+          return next;
+        });
+      });
+
+      void Promise.all(
+        bedsList.map(async (b) => {
+          try {
+            const imgs = scopeImages(
+              "bed",
+              await getBedImages(b.bedId),
+            );
+            return [galleryKey("bed", b.bedId), imgs] as const;
+          } catch {
+            return [
+              galleryKey("bed", b.bedId),
+              [] as PropertyImage[],
+            ] as const;
+          }
+        }),
+      ).then((entries) => {
+        setBedImages((prev) => {
+          const next = { ...prev };
+          for (const [k, imgs] of entries) next[k] = imgs;
+          return next;
+        });
+      });
     } catch (err) {
       console.error(err);
 
@@ -272,39 +400,6 @@ export default function PropertyDetail() {
     };
   }, [property]);
 
-  const loadRoomImages = async (roomId: string) => {
-    const key = galleryKey("room", roomId);
-
-    try {
-      setRoomImagesLoading((prev) => ({
-        ...prev,
-        [roomId]: true,
-      }));
-
-      const images = await getRoomImages(roomId);
-
-      setRoomImages((prev) => ({
-        ...prev,
-        [key]: images,
-      }));
-    } catch (err) {
-      console.error(
-        "Room gallery load failed:",
-        err,
-      );
-
-      setRoomImages((prev) => ({
-        ...prev,
-        [key]: [],
-      }));
-    } finally {
-      setRoomImagesLoading((prev) => ({
-        ...prev,
-        [roomId]: false,
-      }));
-    }
-  };
-
   const openGallery = async (
     target: GalleryTarget,
   ) => {
@@ -317,16 +412,20 @@ export default function PropertyDetail() {
       let images: PropertyImage[] = [];
 
       if (target.scope === "property") {
-        images = await getPropertyImages(
-          target.propertyId,
+        images = scopeImages(
+          "property",
+          await getPropertyImages(
+            target.propertyId,
+          ),
         );
         setPropertyImages(images);
       } else if (
         target.scope === "room" &&
         target.roomId
       ) {
-        images = await getRoomImages(
-          target.roomId,
+        images = scopeImages(
+          "room",
+          await getRoomImages(target.roomId),
         );
 
         setRoomImages((prev) => ({
@@ -340,9 +439,18 @@ export default function PropertyDetail() {
         target.scope === "bed" &&
         target.bedId
       ) {
-        images = await getBedImages(
-          target.bedId,
+        images = scopeImages(
+          "bed",
+          await getBedImages(target.bedId),
         );
+
+        setBedImages((prev) => ({
+          ...prev,
+          [galleryKey(
+            "bed",
+            target.bedId!,
+          )]: images,
+        }));
       }
 
       setGalleryImages(images);
@@ -394,6 +502,9 @@ export default function PropertyDetail() {
     try {
       setBusyId(room.roomId);
       await deleteRoom(room.roomId);
+      if (expandedRoom === room.roomId) {
+        setExpandedRoom(null);
+      }
       await load();
     } catch (err) {
       setError(
@@ -473,10 +584,23 @@ export default function PropertyDetail() {
     );
   }
 
+  const expandedRoomData =
+    property.rooms.find(
+      (r) => r.roomId === expandedRoom,
+    ) ?? null;
+
+  const openRoomGallery = (room: Room) =>
+    void openGallery({
+      scope: "room",
+      propertyId: property.propertyId,
+      roomId: room.roomId,
+      title: `Room ${room.roomNumber}`,
+      subtitle: "Room gallery",
+    });
+
   return (
     <div className="min-h-screen bg-[#F7F6F0] text-[#2C4136] antialiased">
       <div className="w-full px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">
-        
         {/* Top navigation */}
         <div className="flex items-center justify-between gap-3">
           <button
@@ -726,7 +850,7 @@ export default function PropertyDetail() {
         </div>
 
         {/* Rooms */}
-        <section className="mt-4 space-y-4">
+        <section className="mt-4">
           {property.rooms.length === 0 ? (
             <div className="rounded-xl border border-dashed border-[#E3E6DE] bg-white px-6 py-12 text-center">
               <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-[#F2F4EC] text-[#55755A]">
@@ -752,96 +876,119 @@ export default function PropertyDetail() {
                 Add first room
               </button>
             </div>
+          ) : expandedRoomData ? (
+            <RoomDetailView
+              room={expandedRoomData}
+              allRooms={property.rooms}
+              busyId={busyId}
+              roomImages={
+                roomImages[
+                  galleryKey(
+                    "room",
+                    expandedRoomData.roomId,
+                  )
+                ] ?? []
+              }
+              roomCoverId={
+                covers[
+                  galleryKey(
+                    "room",
+                    expandedRoomData.roomId,
+                  )
+                ]
+              }
+              bedImages={bedImages}
+              covers={covers}
+              onBack={() =>
+                setExpandedRoom(null)
+              }
+              onSelectRoom={(roomId) =>
+                setExpandedRoom(roomId)
+              }
+              onEditRoom={() =>
+                setEditingRoom(expandedRoomData)
+              }
+              onDeleteRoom={() =>
+                setDeleteRoomTarget(
+                  expandedRoomData,
+                )
+              }
+              onOpenRoomGallery={() =>
+                openRoomGallery(expandedRoomData)
+              }
+              onCheckIn={(bedId) =>
+                navigate(
+                  `/properties/${property.propertyId}/checkin/${bedId}`,
+                )
+              }
+              onTenant={(tenantId) =>
+                navigate(
+                  `/tenants/${tenantId}`,
+                )
+              }
+              onOperations={() =>
+                navigate("/operations")
+              }
+              onEditBed={(bed) =>
+                setEditingBed(bed)
+              }
+              onDeleteBed={(bed) =>
+                setDeleteBedTarget(bed)
+              }
+              onShowQr={(bed) =>
+                setQrBed(bed)
+              }
+              onOpenBedGallery={(bed) =>
+                void openGallery({
+                  scope: "bed",
+                  propertyId:
+                    property.propertyId,
+                  roomId:
+                    expandedRoomData.roomId,
+                  bedId: bed.bedId,
+                  title: `Bed ${bed.bedNumber}`,
+                  subtitle: `Room ${expandedRoomData.roomNumber} • Bed gallery`,
+                })
+              }
+            />
           ) : (
-            property.rooms.map((room) => (
-              <RoomSection
-                key={room.roomId}
-                room={room}
-                expanded={
-                  expandedRoom === room.roomId
-                }
-                busyId={busyId}
-                roomImages={
-                  roomImages[
-                    galleryKey(
-                      "room",
-                      room.roomId,
-                    )
-                  ] ?? []
-                }
-                roomImagesLoading={
-                  Boolean(
-                    roomImagesLoading[
-                      room.roomId
-                    ],
-                  )
-                }
-                onToggle={() => {
-                  const next =
-                    expandedRoom === room.roomId
-                      ? null
-                      : room.roomId;
-
-                  setExpandedRoom(next);
-
-                  if (next) {
-                    void loadRoomImages(
-                      room.roomId,
-                    );
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {property.rooms.map((room) => (
+                <RoomTile
+                  key={room.roomId}
+                  room={room}
+                  busyId={busyId}
+                  roomImages={
+                    roomImages[
+                      galleryKey(
+                        "room",
+                        room.roomId,
+                      )
+                    ] ?? []
                   }
-                }}
-                onCheckIn={(bedId) =>
-                  navigate(
-                    `/properties/${property.propertyId}/checkin/${bedId}`,
-                  )
-                }
-                onTenant={(tenantId) =>
-                  navigate(
-                    `/tenants/${tenantId}`,
-                  )
-                }
-                onEditRoom={() =>
-                  setEditingRoom(room)
-                }
-                onDeleteRoom={() =>
-                  setDeleteRoomTarget(room)
-                }
-                onEditBed={(bed) =>
-                  setEditingBed(bed)
-                }
-                onDeleteBed={(bed) =>
-                  setDeleteBedTarget(bed)
-                }
-                onShowQr={(bed) =>
-                  setQrBed(bed)
-                }
-                onOpenRoomGallery={() =>
-                  void openGallery({
-                    scope: "room",
-                    propertyId:
-                      property.propertyId,
-                    roomId: room.roomId,
-                    title:
-                      `Room ${room.roomNumber}`,
-                    subtitle:
-                      "Room gallery",
-                  })
-                }
-                onOpenBedGallery={(bed) =>
-                  void openGallery({
-                    scope: "bed",
-                    propertyId:
-                      property.propertyId,
-                    roomId: room.roomId,
-                    bedId: bed.bedId,
-                    title:
-                      `Bed ${bed.bedNumber}`,
-                    subtitle:
-                      `Room ${room.roomNumber} • Bed gallery`,
-                  })
-                }
-              />
-            ))
+                  coverId={
+                    covers[
+                      galleryKey(
+                        "room",
+                        room.roomId,
+                      )
+                    ]
+                  }
+                  onOpen={() =>
+                    setExpandedRoom(room.roomId)
+                  }
+                  onEditRoom={() =>
+                    setEditingRoom(room)
+                  }
+                  onDeleteRoom={() =>
+                    setDeleteRoomTarget(room)
+                  }
+                  onOpenRoomGallery={() =>
+                    openRoomGallery(room)
+                  }
+                />
+              ))}
+            </div>
           )}
         </section>
       </div>
@@ -964,6 +1111,16 @@ export default function PropertyDetail() {
           images={galleryImages}
           loading={galleryLoading}
           error={galleryError}
+          coverId={covers[targetKey(galleryTarget)]}
+          showCoverControl={
+            galleryTarget.scope !== "property"
+          }
+          onSetCover={(imageId) =>
+            setCover(
+              targetKey(galleryTarget),
+              imageId,
+            )
+          }
           onClose={() =>
             setGalleryTarget(null)
           }
@@ -1099,37 +1256,210 @@ function PropertyGallerySection({
   );
 }
 
-function RoomSection({
+function RoomTile({
   room,
-  expanded,
   busyId,
   roomImages,
-  roomImagesLoading,
-  onToggle,
-  onCheckIn,
-  onTenant,
+  coverId,
+  onOpen,
   onEditRoom,
   onDeleteRoom,
+  onOpenRoomGallery,
+}: {
+  room: Room;
+  busyId: string | null;
+  roomImages: PropertyImage[];
+  coverId?: string;
+  onOpen: () => void;
+  onEditRoom: () => void;
+  onDeleteRoom: () => void;
+  onOpenRoomGallery: () => void;
+}) {
+  const occupied = room.beds.filter(
+    (bed) => bed.status === "Occupied",
+  ).length;
+
+  const cleaning = room.beds.filter(
+    (bed) => bed.status === "NeedsCleaning",
+  ).length;
+
+  const cover = pickCover(roomImages, coverId);
+  const bgUrl = cover?.imageUrl
+    ? resolveImageUrl(cover.imageUrl)
+    : null;
+  const hasImage = Boolean(bgUrl);
+
+  const iconBtn = hasImage
+    ? "bg-black/40 text-white backdrop-blur-sm hover:bg-black/60"
+    : "bg-[#F2F4EC] text-[#7D887D] hover:bg-[#E3E6DE] hover:text-[#294436]";
+
+  return (
+    <article
+      style={
+        bgUrl
+          ? {
+              backgroundImage: cssUrl(bgUrl),
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+            }
+          : undefined
+      }
+      className={`group relative aspect-[4/3] overflow-hidden rounded-xl border border-[#E3E6DE] shadow-sm transition hover:shadow-md ${
+        hasImage
+          ? "bg-[#16261E] text-white"
+          : "bg-white text-[#294436]"
+      }`}
+    >
+      {hasImage && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-black/30"
+        />
+      )}
+
+      {/* Whole tile click = open this room */}
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`Open room ${room.roomNumber}`}
+        className="absolute inset-0 z-0"
+      />
+
+      {/* Top actions */}
+      <div className="absolute right-2.5 top-2.5 z-10 flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onOpenRoomGallery}
+          className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-medium transition ${iconBtn}`}
+          title="Room photos"
+        >
+          <Camera className="h-3 w-3" />
+          Photos
+        </button>
+
+        <button
+          type="button"
+          onClick={onEditRoom}
+          className={`rounded-lg p-1.5 transition ${iconBtn}`}
+          title="Edit room"
+        >
+          <Edit3 className="h-3.5 w-3.5" />
+        </button>
+
+        <button
+          type="button"
+          onClick={onDeleteRoom}
+          disabled={busyId === room.roomId}
+          className={`rounded-lg p-1.5 transition disabled:opacity-40 ${iconBtn}`}
+          title="Delete room"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {!hasImage && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-[#C9D3C6]">
+          <BedDouble className="h-12 w-12" />
+        </div>
+      )}
+
+      {/* Bottom info */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-end justify-between gap-2 p-3.5">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="truncate text-sm font-medium">
+              Room {room.roomNumber}
+            </h3>
+
+            <span
+              className={`rounded-md px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider ${
+                hasImage
+                  ? "bg-white/20 text-white backdrop-blur-sm"
+                  : "bg-[#F2F4EC] text-[#55755A]"
+              }`}
+            >
+              {room.roomType}
+            </span>
+          </div>
+
+          <div
+            className={`mt-1 flex flex-wrap gap-2 text-[11px] ${
+              hasImage
+                ? "text-white/85"
+                : "text-[#859083]"
+            }`}
+          >
+            <span>
+              {occupied}/{room.beds.length} occupied
+            </span>
+
+            {cleaning > 0 && (
+              <span
+                className={`font-medium ${
+                  hasImage
+                    ? "text-amber-300"
+                    : "text-[#9B712F]"
+                }`}
+              >
+                • {cleaning} cleaning
+              </span>
+            )}
+          </div>
+        </div>
+
+        <span
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
+            hasImage
+              ? "bg-white/20 text-white backdrop-blur-sm"
+              : "bg-[#F7F6F0] text-[#7D887D]"
+          }`}
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </span>
+      </div>
+    </article>
+  );
+}
+
+function RoomDetailView({
+  room,
+  allRooms,
+  busyId,
+  roomImages,
+  roomCoverId,
+  bedImages,
+  covers,
+  onBack,
+  onSelectRoom,
+  onEditRoom,
+  onDeleteRoom,
+  onOpenRoomGallery,
+  onCheckIn,
+  onTenant,
+  onOperations,
   onEditBed,
   onDeleteBed,
   onShowQr,
-  onOpenRoomGallery,
   onOpenBedGallery,
 }: {
   room: Room;
-  expanded: boolean;
+  allRooms: Room[];
   busyId: string | null;
   roomImages: PropertyImage[];
-  roomImagesLoading: boolean;
-  onToggle: () => void;
-  onCheckIn: (id: string) => void;
-  onTenant: (id: string) => void;
+  roomCoverId?: string;
+  bedImages: GalleryCache;
+  covers: CoverMap;
+  onBack: () => void;
+  onSelectRoom: (roomId: string) => void;
   onEditRoom: () => void;
   onDeleteRoom: () => void;
+  onOpenRoomGallery: () => void;
+  onCheckIn: (id: string) => void;
+  onTenant: (id: string) => void;
+  onOperations: () => void;
   onEditBed: (bed: Bed) => void;
   onDeleteBed: (bed: Bed) => void;
   onShowQr: (bed: Bed) => void;
-  onOpenRoomGallery: () => void;
   onOpenBedGallery: (bed: Bed) => void;
 }) {
   const occupied = room.beds.filter(
@@ -1140,205 +1470,200 @@ function RoomSection({
     (bed) => bed.status === "NeedsCleaning",
   ).length;
 
-  return (
-    <article className="overflow-hidden rounded-xl border border-[#E3E6DE] bg-white shadow-sm">
-      <div className="flex flex-col gap-4 p-4 sm:p-5 sm:flex-row sm:items-center sm:justify-between">
-        <button
-          onClick={onToggle}
-          className="flex min-w-0 items-center gap-3.5 text-left"
-        >
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#F2F4EC] text-[#55755A]">
-            <BedDouble className="h-4 w-4" />
-          </div>
+  const cover = pickCover(roomImages, roomCoverId);
+  const bgUrl = cover?.imageUrl
+    ? resolveImageUrl(cover.imageUrl)
+    : null;
+  const hasImage = Boolean(bgUrl);
 
+  const heroBtn = hasImage
+    ? "border-white/20 bg-black/40 text-white backdrop-blur-sm hover:bg-black/60"
+    : "border-[#E3E6DE] bg-white text-[#40543E] hover:bg-[#F2F4EC]";
+
+  return (
+    <div>
+      {/* Back + room switcher */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <button
+          type="button"
+          onClick={onBack}
+          className="inline-flex items-center gap-2 self-start rounded-lg border border-[#E3E6DE] bg-white px-3 py-2 text-xs font-medium text-[#40543E] shadow-sm hover:bg-[#F2F4EC]"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+          All rooms
+        </button>
+
+        <div className="flex max-w-full gap-1.5 overflow-x-auto pb-1">
+          {allRooms.map((r) => (
+            <button
+              key={r.roomId}
+              type="button"
+              onClick={() =>
+                onSelectRoom(r.roomId)
+              }
+              className={`shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+                r.roomId === room.roomId
+                  ? "border-[#1D4435] bg-[#1D4435] text-white"
+                  : "border-[#E3E6DE] bg-white text-[#40543E] hover:bg-[#F2F4EC]"
+              }`}
+            >
+              Room {r.roomNumber}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Room hero */}
+      <div
+        style={
+          bgUrl
+            ? {
+                backgroundImage: cssUrl(bgUrl),
+                backgroundSize: "cover",
+                backgroundPosition: "center",
+              }
+            : undefined
+        }
+        className={`relative mt-4 flex min-h-[160px] flex-col justify-end overflow-hidden rounded-xl border border-[#E3E6DE] p-4 shadow-sm sm:min-h-[200px] sm:p-5 ${
+          hasImage
+            ? "bg-[#16261E] text-white"
+            : "bg-white text-[#294436]"
+        }`}
+      >
+        {hasImage && (
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/85 via-black/35 to-black/25"
+          />
+        )}
+
+        <div className="relative z-10 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-xs font-medium text-[#294436]">
+              <h3 className="text-lg font-medium">
                 Room {room.roomNumber}
               </h3>
 
-              <span className="rounded-md bg-[#F2F4EC] px-2.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-[#55755A]">
+              <span
+                className={`rounded-md px-2.5 py-0.5 text-[9px] font-medium uppercase tracking-wider ${
+                  hasImage
+                    ? "bg-white/20 text-white backdrop-blur-sm"
+                    : "bg-[#F2F4EC] text-[#55755A]"
+                }`}
+              >
                 {room.roomType}
               </span>
             </div>
 
-            <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-[#859083]">
+            <div
+              className={`mt-1 flex flex-wrap gap-2 text-xs ${
+                hasImage
+                  ? "text-white/85"
+                  : "text-[#859083]"
+              }`}
+            >
               <span>
                 {occupied}/{room.beds.length} occupied
               </span>
 
               {cleaning > 0 && (
-                <span className="font-medium text-[#9B712F]">
+                <span
+                  className={`font-medium ${
+                    hasImage
+                      ? "text-amber-300"
+                      : "text-[#9B712F]"
+                  }`}
+                >
                   • {cleaning} cleaning
                 </span>
               )}
             </div>
           </div>
-        </button>
 
-        <div className="flex items-center gap-1.5 self-end sm:self-auto">
-          <button
-            type="button"
-            onClick={onOpenRoomGallery}
-            className="inline-flex items-center gap-1 rounded-lg border border-[#E3E6DE] bg-white px-2.5 py-1.5 text-[10px] font-medium text-[#55755A] hover:bg-[#F2F4EC]"
-            title="Room gallery"
-          >
-            <Camera className="h-3 w-3" />
-            Photos
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onOpenRoomGallery}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition ${heroBtn}`}
+            >
+              <Camera className="h-3.5 w-3.5" />
+              Photos
+            </button>
 
-          <button
-            onClick={onEditRoom}
-            className="rounded-lg p-2 text-[#7D887D] hover:bg-[#F2F4EC] hover:text-[#294436]"
-            title="Edit room"
-          >
-            <Edit3 className="h-3.5 w-3.5" />
-          </button>
+            <button
+              type="button"
+              onClick={onEditRoom}
+              className={`rounded-lg border p-2 transition ${heroBtn}`}
+              title="Edit room"
+            >
+              <Edit3 className="h-3.5 w-3.5" />
+            </button>
 
-          <button
-            onClick={onDeleteRoom}
-            disabled={
-              busyId === room.roomId
-            }
-            className="rounded-lg p-2 text-[#7D887D] hover:bg-[#FBF0E9] hover:text-[#A2634B] disabled:opacity-40"
-            title="Delete room"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            onClick={onToggle}
-            className="rounded-lg bg-[#F7F6F0] p-2 text-[#7D887D] hover:bg-[#E3E6DE]"
-            aria-label="Toggle room"
-          >
-            {expanded ? (
-              <ChevronUp className="h-3.5 w-3.5" />
-            ) : (
-              <ChevronDown className="h-3.5 w-3.5" />
-            )}
-          </button>
+            <button
+              type="button"
+              onClick={onDeleteRoom}
+              disabled={busyId === room.roomId}
+              className={`rounded-lg border p-2 transition disabled:opacity-40 ${heroBtn}`}
+              title="Delete room"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
       </div>
 
-      {expanded && (
-        <div className="border-t border-[#EEF0E9] bg-[#F7F6F0]/60 p-4 sm:p-5">
-          <div className="mb-4 rounded-xl border border-[#E3E6DE] bg-white p-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <div className="flex items-center gap-1.5">
-                  <ImageIcon className="h-3.5 w-3.5 text-[#55755A]" />
-                  <h4 className="text-xs font-medium text-[#294436]">
-                    Room photos
-                  </h4>
-                </div>
+      {/* Beds of this room only */}
+      <div className="mt-4 rounded-xl border border-[#E3E6DE] bg-white p-4 shadow-sm sm:p-5">
+        <p className="text-[9px] font-medium uppercase tracking-[0.12em] text-[#55755A]">
+          Beds in room {room.roomNumber}
+        </p>
 
-                <p className="mt-0.5 text-[10px] text-[#859083]">
-                  {roomImages.length
-                    ? `${roomImages.length} photo${roomImages.length > 1 ? "s" : ""}`
-                    : "No room photos added yet."}
-                </p>
-              </div>
+        {room.beds.length === 0 ? (
+          <p className="mt-3 rounded-lg border border-dashed border-[#DFE4DA] bg-[#F7F6F0]/50 px-4 py-8 text-center text-xs text-[#859083]">
+            This room has no beds yet.
+          </p>
+        ) : (
+          <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {room.beds.map((bed) => {
+              const key = galleryKey(
+                "bed",
+                bed.bedId,
+              );
 
-              <button
-                type="button"
-                onClick={onOpenRoomGallery}
-                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-[#E3E6DE] bg-white px-3 py-1.5 text-xs font-medium text-[#40543E] hover:bg-[#F2F4EC]"
-              >
-                <Camera className="h-3.5 w-3.5" />
-                Manage photos
-              </button>
-            </div>
-
-            {roomImagesLoading ? (
-              <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
-                {Array.from({
-                  length: 5,
-                }).map((_, index) => (
-                  <div
-                    key={index}
-                    className="aspect-[4/3] animate-pulse rounded-lg bg-[#E3E6DE]"
-                  />
-                ))}
-              </div>
-            ) : roomImages.length ? (
-              <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
-                {roomImages
-                  .slice(0, 5)
-                  .map((image) => (
-                    <button
-                      type="button"
-                      key={image.propertyImageId}
-                      onClick={onOpenRoomGallery}
-                      className="group relative aspect-[4/3] overflow-hidden rounded-lg border border-[#E3E6DE] bg-white"
-                    >
-                      <img
-                        src={resolveImageUrl(
-                          image.imageUrl,
-                        )}
-                        alt={
-                          image.caption ||
-                          `Room ${room.roomNumber}`
-                        }
-                        className="h-full w-full object-cover transition duration-200 group-hover:scale-105"
-                        loading="lazy"
-                      />
-
-                      <div className="absolute inset-0 flex items-center justify-center bg-slate-950/0 text-white opacity-0 transition group-hover:bg-slate-950/25 group-hover:opacity-100">
-                        <Maximize2 className="h-3.5 w-3.5" />
-                      </div>
-                    </button>
-                  ))}
-
-                {roomImages.length > 5 && (
-                  <button
-                    type="button"
-                    onClick={onOpenRoomGallery}
-                    className="flex aspect-[4/3] items-center justify-center rounded-lg border border-[#E3E6DE] bg-[#F7F6F0] text-xs font-medium text-[#40543E] hover:bg-[#E8EFE8]"
-                  >
-                    +{roomImages.length - 5}
-                  </button>
-                )}
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={onOpenRoomGallery}
-                className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[#DFE4DA] bg-[#F7F6F0]/50 px-3.5 py-3 text-xs font-medium text-[#55755A] hover:bg-[#E8EFE8]"
-              >
-                <Upload className="h-3.5 w-3.5" />
-                Upload first room photo
-              </button>
-            )}
+              return (
+                <BedCard
+                  key={bed.bedId}
+                  bed={bed}
+                  busyId={busyId}
+                  bedImages={bedImages[key] ?? []}
+                  coverId={covers[key]}
+                  onCheckIn={onCheckIn}
+                  onTenant={onTenant}
+                  onOperations={onOperations}
+                  onEdit={onEditBed}
+                  onDelete={onDeleteBed}
+                  onShowQr={onShowQr}
+                  onOpenGallery={() =>
+                    onOpenBedGallery(bed)
+                  }
+                />
+              );
+            })}
           </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {room.beds.map((bed) => (
-              <BedCard
-                key={bed.bedId}
-                bed={bed}
-                busyId={busyId}
-                onCheckIn={onCheckIn}
-                onTenant={onTenant}
-                onEdit={onEditBed}
-                onDelete={onDeleteBed}
-                onShowQr={onShowQr}
-                onOpenGallery={() =>
-                  onOpenBedGallery(bed)
-                }
-              />
-            ))}
-          </div>
-        </div>
-      )}
-    </article>
+        )}
+      </div>
+    </div>
   );
 }
 
 function BedCard({
   bed,
   busyId,
+  bedImages,
+  coverId,
   onCheckIn,
   onTenant,
+  onOperations,
   onEdit,
   onDelete,
   onShowQr,
@@ -1346,18 +1671,24 @@ function BedCard({
 }: {
   bed: Bed;
   busyId: string | null;
+  bedImages: PropertyImage[];
+  coverId?: string;
   onCheckIn: (id: string) => void;
   onTenant: (id: string) => void;
+  onOperations: () => void;
   onEdit: (bed: Bed) => void;
   onDelete: (bed: Bed) => void;
   onShowQr: (bed: Bed) => void;
   onOpenGallery: () => void;
 }) {
-  const isOccupied =
-    bed.status === "Occupied";
+  const isOccupied = bed.status === "Occupied";
+  const isCleaning = bed.status === "NeedsCleaning";
 
-  const isCleaning =
-    bed.status === "NeedsCleaning";
+  const cover = pickCover(bedImages, coverId);
+  const bedBgUrl = cover?.imageUrl
+    ? resolveImageUrl(cover.imageUrl)
+    : null;
+  const hasBedImage = Boolean(bedBgUrl);
 
   const getStatusText = () => {
     if (isOccupied) return "Occupied";
@@ -1366,200 +1697,275 @@ function BedCard({
   };
 
   const getStatusClass = () => {
+    if (hasBedImage) {
+      if (isOccupied) return "text-amber-200";
+      if (isCleaning) return "text-yellow-300";
+      return "text-emerald-300";
+    }
     if (isOccupied) return "text-[#A2634B]";
     if (isCleaning) return "text-[#9B712F]";
     return "text-[#356248]";
   };
 
   const getCardBorder = () => {
+    if (hasBedImage) return "border-[#2A3B32]";
     if (isOccupied) return "border-[#E7D4C7]";
     if (isCleaning) return "border-[#F7EEDC]";
     return "border-[#D5E2D5]";
   };
 
+  const photoBtnClass = `mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition ${
+    hasBedImage
+      ? "border-white/20 bg-white/15 text-white backdrop-blur-sm hover:bg-white/25"
+      : isOccupied || !isCleaning
+        ? "border-[#D5E2D5] bg-[#E8EFE8] text-[#356248] hover:bg-[#D5E2D5]"
+        : "border-[#E3E6DE] bg-white text-[#40543E] hover:bg-[#F2F4EC]"
+  }`;
+
+  const qrBtnClass = `mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition ${
+    hasBedImage
+      ? "border-white/20 bg-black/35 text-white backdrop-blur-sm hover:bg-black/50"
+      : "border-[#E3E6DE] bg-white text-[#40543E] hover:bg-[#F2F4EC]"
+  }`;
+
   return (
     <div
-      className={`rounded-xl border bg-white p-4 shadow-sm ${getCardBorder()}`}
+      style={
+        bedBgUrl
+          ? {
+              backgroundImage: cssUrl(bedBgUrl),
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+            }
+          : undefined
+      }
+      className={`relative overflow-hidden rounded-xl border p-4 shadow-sm transition-shadow hover:shadow-md ${getCardBorder()} ${
+        hasBedImage ? "bg-[#16261E] text-white" : "bg-white"
+      }`}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <p
-            className={`text-[9px] font-medium uppercase tracking-wider ${getStatusClass()}`}
-          >
-            {getStatusText()}
-          </p>
-
-          <h4 className="mt-0.5 text-xs font-medium text-[#294436]">
-            Bed {bed.bedNumber}
-          </h4>
-        </div>
-
-        <div className="flex gap-0.5">
-          <button
-            onClick={() => onEdit(bed)}
-            className="rounded-lg p-1.5 text-[#7D887D] hover:bg-[#F2F4EC] hover:text-[#294436]"
-            title="Edit bed"
-          >
-            <Pencil className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            disabled={
-              busyId === bed.bedId ||
-              isOccupied ||
-              isCleaning
-            }
-            onClick={() => onDelete(bed)}
-            className="rounded-lg p-1.5 text-[#7D887D] hover:bg-[#FBF0E9] hover:text-[#A2634B] disabled:cursor-not-allowed disabled:opacity-30"
-            title={
-              isOccupied
-                ? "Occupied beds cannot be deleted"
-                : isCleaning
-                  ? "Beds under cleaning cannot be deleted"
-                  : "Delete bed"
-            }
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      </div>
-
-      {isOccupied && bed.tenant ? (
-        <>
-          <button
-            onClick={() =>
-              onTenant(
-                bed.tenant!.tenantId,
-              )
-            }
-            className="mt-3.5 w-full rounded-lg bg-[#FBF0E9]/70 p-3 text-left hover:bg-[#FBF0E9]"
-          >
-            <div className="flex items-center gap-2.5">
-              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white text-[9px] font-medium text-[#294436] shadow-sm">
-                {bed.tenant.fullName
-                  .split(" ")
-                  .map(
-                    (part) =>
-                      part[0],
-                  )
-                  .join("")
-                  .slice(0, 2)
-                  .toUpperCase()}
-              </div>
-
-              <div className="min-w-0">
-                <p className="truncate text-xs font-medium text-[#294436]">
-                  {bed.tenant.fullName}
-                </p>
-
-                <p className="truncate text-[10px] text-[#859083]">
-                  {bed.tenant.mobileNumber}
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-2.5 flex items-center justify-between text-[10px]">
-              <span className="text-[#859083]">
-                Balance due
-              </span>
-
-              <span className="font-medium text-[#294436]">
-                {money(
-                  bed.tenant.balanceDue,
-                )}
-              </span>
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenGallery}
-            className="mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#D5E2D5] bg-[#E8EFE8] px-3 py-2 text-xs font-medium text-[#356248] hover:bg-[#D5E2D5]"
-          >
-            <Camera className="h-3.5 w-3.5" />
-            Bed photos
-          </button>
-
-          {bed.guestAccessToken && (
-            <button
-              type="button"
-              onClick={() =>
-                onShowQr(bed)
-              }
-              className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#E3E6DE] bg-white px-3 py-2 text-xs font-medium text-[#40543E] hover:bg-[#F2F4EC]"
-            >
-              <QrCode className="h-3.5 w-3.5" />
-              Show Guest QR
-            </button>
-          )}
-        </>
-      ) : (
-        <>
-          <p
-            className={`mt-3.5 text-xs font-medium ${
-              isCleaning
-                ? "text-[#9B712F]"
-                : "text-[#356248]"
-            }`}
-          >
-            {isCleaning
-              ? "Cleaning required"
-              : "Available"}
-          </p>
-
-          <p className="mt-0.5 text-[10px] text-[#859083]">
-            {money(bed.monthlyRent)} / month
-          </p>
-
-          {isCleaning ? (
-            <button
-              type="button"
-              onClick={() => navigat("/operations")}
-              className="mt-3.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#F7EEDC] bg-[#F7EEDC] px-3 py-2 text-xs font-medium text-[#9B712F] transition hover:bg-[#F0E5D0]"
-            >
-              <Sparkles className="h-3.5 w-3.5" />
-              View Cleaning Task →
-            </button>
-          ) : (
-            <button
-              onClick={() =>
-                onCheckIn(
-                  bed.bedId,
-                )
-              }
-              className="mt-3.5 w-full rounded-lg bg-[#E8EFE8] px-3 py-2 text-xs font-medium text-[#356248] hover:bg-[#D5E2D5]"
-            >
-              Check-in tenant →
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={onOpenGallery}
-            className={`mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium ${
-              isCleaning
-                ? "border-[#E3E6DE] bg-white text-[#40543E] hover:bg-[#F2F4EC]"
-                : "border-[#D5E2D5] bg-[#E8EFE8] text-[#356248] hover:bg-[#D5E2D5]"
-            }`}
-          >
-            <Camera className="h-3.5 w-3.5" />
-            Bed photos
-          </button>
-
-          {bed.guestAccessToken && (
-            <button
-              type="button"
-              onClick={() =>
-                onShowQr(bed)
-              }
-              className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#E3E6DE] bg-white px-3 py-2 text-xs font-medium text-[#40543E] hover:bg-[#F2F4EC]"
-            >
-              <QrCode className="h-3.5 w-3.5" />
-              Show Guest QR
-            </button>
-          )}
-        </>
+      {hasBedImage && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/85 via-black/60 to-black/40"
+        />
       )}
+
+      <div className="relative z-10">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <p
+              className={`text-[9px] font-medium uppercase tracking-wider ${getStatusClass()}`}
+            >
+              {getStatusText()}
+            </p>
+
+            <h4
+              className={`mt-0.5 text-sm font-medium sm:text-xs ${
+                hasBedImage ? "text-white" : "text-[#294436]"
+              }`}
+            >
+              Bed {bed.bedNumber}
+            </h4>
+          </div>
+
+          <div className="flex gap-0.5">
+            <button
+              type="button"
+              onClick={() => onEdit(bed)}
+              className={`rounded-lg p-1.5 transition ${
+                hasBedImage
+                  ? "text-white/85 hover:bg-white/15 hover:text-white"
+                  : "text-[#7D887D] hover:bg-[#F2F4EC] hover:text-[#294436]"
+              }`}
+              title="Edit bed"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+
+            <button
+              type="button"
+              disabled={
+                busyId === bed.bedId ||
+                isOccupied ||
+                isCleaning
+              }
+              onClick={() => onDelete(bed)}
+              className={`rounded-lg p-1.5 transition disabled:cursor-not-allowed disabled:opacity-30 ${
+                hasBedImage
+                  ? "text-white/85 hover:bg-rose-500/25 hover:text-rose-200"
+                  : "text-[#7D887D] hover:bg-[#FBF0E9] hover:text-[#A2634B]"
+              }`}
+              title={
+                isOccupied
+                  ? "Occupied beds cannot be deleted"
+                  : isCleaning
+                    ? "Beds under cleaning cannot be deleted"
+                    : "Delete bed"
+              }
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {isOccupied && bed.tenant ? (
+          <>
+            <button
+              type="button"
+              onClick={() => onTenant(bed.tenant!.tenantId)}
+              className={`mt-3.5 w-full rounded-lg p-3 text-left transition ${
+                hasBedImage
+                  ? "border border-white/15 bg-black/40 backdrop-blur-sm hover:bg-black/55"
+                  : "bg-[#FBF0E9]/70 hover:bg-[#FBF0E9]"
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <div
+                  className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[9px] font-medium shadow-sm ${
+                    hasBedImage
+                      ? "bg-white/20 text-white"
+                      : "bg-white text-[#294436]"
+                  }`}
+                >
+                  {bed.tenant.fullName
+                    .split(" ")
+                    .map((part) => part[0])
+                    .join("")
+                    .slice(0, 2)
+                    .toUpperCase()}
+                </div>
+
+                <div className="min-w-0">
+                  <p
+                    className={`truncate text-xs font-medium ${
+                      hasBedImage ? "text-white" : "text-[#294436]"
+                    }`}
+                  >
+                    {bed.tenant.fullName}
+                  </p>
+
+                  <p
+                    className={`truncate text-[10px] ${
+                      hasBedImage ? "text-white/75" : "text-[#859083]"
+                    }`}
+                  >
+                    {bed.tenant.mobileNumber}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-2.5 flex items-center justify-between text-[10px]">
+                <span
+                  className={
+                    hasBedImage ? "text-white/75" : "text-[#859083]"
+                  }
+                >
+                  Balance due
+                </span>
+
+                <span
+                  className={`font-medium ${
+                    hasBedImage ? "text-white" : "text-[#294436]"
+                  }`}
+                >
+                  {money(bed.tenant.balanceDue)}
+                </span>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenGallery}
+              className={photoBtnClass}
+            >
+              <Camera className="h-3.5 w-3.5" />
+              Bed photos
+            </button>
+
+            {bed.guestAccessToken && (
+              <button
+                type="button"
+                onClick={() => onShowQr(bed)}
+                className={qrBtnClass}
+              >
+                <QrCode className="h-3.5 w-3.5" />
+                Show Guest QR
+              </button>
+            )}
+          </>
+        ) : (
+          <>
+            <p
+              className={`mt-3.5 text-xs font-medium ${
+                hasBedImage
+                  ? isCleaning
+                    ? "text-yellow-300"
+                    : "text-emerald-300"
+                  : isCleaning
+                    ? "text-[#9B712F]"
+                    : "text-[#356248]"
+              }`}
+            >
+              {isCleaning ? "Cleaning required" : "Available"}
+            </p>
+
+            <p
+              className={`mt-0.5 text-[10px] ${
+                hasBedImage ? "text-white/80" : "text-[#859083]"
+              }`}
+            >
+              {money(bed.monthlyRent)} / month
+            </p>
+
+            {isCleaning ? (
+              <button
+                type="button"
+                onClick={onOperations}
+                className={`mt-3.5 flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                  hasBedImage
+                    ? "border-amber-300/30 bg-amber-400/20 text-amber-100 backdrop-blur-sm hover:bg-amber-400/30"
+                    : "border-[#F7EEDC] bg-[#F7EEDC] text-[#9B712F] hover:bg-[#F0E5D0]"
+                }`}
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                View Cleaning Task →
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onCheckIn(bed.bedId)}
+                className={`mt-3.5 w-full rounded-lg px-3 py-2 text-xs font-medium transition ${
+                  hasBedImage
+                    ? "bg-emerald-500/85 text-white hover:bg-emerald-500"
+                    : "bg-[#E8EFE8] text-[#356248] hover:bg-[#D5E2D5]"
+                }`}
+              >
+                Check-in tenant →
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={onOpenGallery}
+              className={photoBtnClass}
+            >
+              <Camera className="h-3.5 w-3.5" />
+              Bed photos
+            </button>
+
+            {bed.guestAccessToken && (
+              <button
+                type="button"
+                onClick={() => onShowQr(bed)}
+                className={qrBtnClass}
+              >
+                <QrCode className="h-3.5 w-3.5" />
+                Show Guest QR
+              </button>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -1569,6 +1975,9 @@ function ImageGalleryModal({
   images,
   loading,
   error,
+  coverId,
+  showCoverControl,
+  onSetCover,
   onClose,
   onRefresh,
   onDeleted,
@@ -1578,6 +1987,9 @@ function ImageGalleryModal({
   images: PropertyImage[];
   loading: boolean;
   error: string;
+  coverId?: string;
+  showCoverControl: boolean;
+  onSetCover: (imageId: string) => void;
   onClose: () => void;
   onRefresh: () => Promise<void>;
   onDeleted: () => Promise<void>;
@@ -1602,6 +2014,11 @@ function ImageGalleryModal({
 
   const [localMessage, setLocalMessage] =
     useState("");
+
+  const effectiveCoverId = pickCover(
+    images,
+    coverId,
+  )?.propertyImageId;
 
   const upload = async () => {
     setError("");
@@ -1650,8 +2067,15 @@ function ImageGalleryModal({
       await uploadPropertyImage({
         propertyId:
           target.propertyId,
-        roomId: target.roomId,
-        bedId: target.bedId,
+        // Bed photo me roomId nahi bhejte, taaki wo room gallery me na aaye
+        roomId:
+          target.scope === "bed"
+            ? undefined
+            : target.roomId,
+        bedId:
+          target.scope === "bed"
+            ? target.bedId
+            : undefined,
         caption:
           caption.trim() || undefined,
         file: selectedFile,
@@ -1856,6 +2280,14 @@ function ImageGalleryModal({
                           : "s"
                       }`}
                 </p>
+
+                {showCoverControl &&
+                  !loading &&
+                  images.length > 0 && (
+                    <p className="mt-0.5 text-[10px] text-[#8C9782]">
+                      Star dabao jis photo ko background (cover) banana hai.
+                    </p>
+                  )}
               </div>
 
               {!loading && (
@@ -1899,79 +2331,131 @@ function ImageGalleryModal({
               </div>
             ) : (
               <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                {images.map((image) => (
-                  <div
-                    key={
-                      image.propertyImageId
-                    }
-                    className="group overflow-hidden rounded-xl border border-[#E3E6DE] bg-white shadow-sm"
-                  >
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setSelectedImage(
-                          image,
-                        )
+                {images.map((image) => {
+                  const isCover =
+                    showCoverControl &&
+                    image.propertyImageId ===
+                      effectiveCoverId;
+
+                  return (
+                    <div
+                      key={
+                        image.propertyImageId
                       }
-                      className="relative block aspect-[4/3] w-full overflow-hidden bg-[#F7F6F0]"
+                      className={`group overflow-hidden rounded-xl border bg-white shadow-sm ${
+                        isCover
+                          ? "border-[#1D4435] ring-2 ring-[#1D4435]/30"
+                          : "border-[#E3E6DE]"
+                      }`}
                     >
-                      <img
-                        src={resolveImageUrl(
-                          image.imageUrl,
-                        )}
-                        alt={
-                          image.caption ||
-                          "RoomEase property photo"
-                        }
-                        className="h-full w-full object-cover transition duration-200 group-hover:scale-105"
-                        loading="lazy"
-                      />
-
-                      <div className="absolute inset-0 flex items-center justify-center bg-slate-950/0 text-white opacity-0 transition group-hover:bg-slate-950/25 group-hover:opacity-100">
-                        <Eye className="h-4 w-4" />
-                      </div>
-                    </button>
-
-                    <div className="p-3">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate text-xs font-medium text-[#294436]">
-                            {image.caption ||
-                              "Untitled photo"}
-                          </p>
-
-                          <p className="mt-0.5 text-[10px] text-[#8C9782]">
-                            {formatGalleryDate(
-                              image.uploadedAt,
-                            )}
-                          </p>
-                        </div>
-
+                      <div className="relative">
                         <button
                           type="button"
                           onClick={() =>
-                            void deleteImage(
+                            setSelectedImage(
                               image,
                             )
                           }
-                          disabled={
-                            deletingId ===
-                            image.propertyImageId
-                          }
-                          className="shrink-0 rounded-lg p-1.5 text-[#7D887D] hover:bg-[#FBF0E9] hover:text-[#A2634B] disabled:opacity-40"
-                          title="Delete image"
+                          className="relative block aspect-[4/3] w-full overflow-hidden bg-[#F7F6F0]"
                         >
-                          {deletingId ===
-                          image.propertyImageId ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Trash2 className="h-3.5 w-3.5" />
-                          )}
+                          <img
+                            src={resolveImageUrl(
+                              image.imageUrl,
+                            )}
+                            alt={
+                              image.caption ||
+                              "RoomEase property photo"
+                            }
+                            className="h-full w-full object-cover transition duration-200 group-hover:scale-105"
+                            loading="lazy"
+                          />
+
+                          <div className="absolute inset-0 flex items-center justify-center bg-slate-950/0 text-white opacity-0 transition group-hover:bg-slate-950/25 group-hover:opacity-100">
+                            <Eye className="h-4 w-4" />
+                          </div>
                         </button>
+
+                        {isCover && (
+                          <span className="pointer-events-none absolute left-2 top-2 inline-flex items-center gap-1 rounded-md bg-[#1D4435] px-2 py-1 text-[9px] font-medium uppercase tracking-wider text-white shadow">
+                            <Star className="h-2.5 w-2.5 fill-current" />
+                            Cover
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-medium text-[#294436]">
+                              {image.caption ||
+                                "Untitled photo"}
+                            </p>
+
+                            <p className="mt-0.5 text-[10px] text-[#8C9782]">
+                              {formatGalleryDate(
+                                image.uploadedAt,
+                              )}
+                            </p>
+                          </div>
+
+                          <div className="flex shrink-0 items-center gap-0.5">
+                            {showCoverControl && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onSetCover(
+                                    image.propertyImageId,
+                                  )
+                                }
+                                disabled={isCover}
+                                className={`rounded-lg p-1.5 transition ${
+                                  isCover
+                                    ? "text-[#1D4435]"
+                                    : "text-[#7D887D] hover:bg-[#F2F4EC] hover:text-[#1D4435]"
+                                }`}
+                                title={
+                                  isCover
+                                    ? "Current cover"
+                                    : "Set as cover (background)"
+                                }
+                              >
+                                <Star
+                                  className={`h-3.5 w-3.5 ${
+                                    isCover
+                                      ? "fill-current"
+                                      : ""
+                                  }`}
+                                />
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void deleteImage(
+                                  image,
+                                )
+                              }
+                              disabled={
+                                deletingId ===
+                                image.propertyImageId
+                              }
+                              className="rounded-lg p-1.5 text-[#7D887D] hover:bg-[#FBF0E9] hover:text-[#A2634B] disabled:opacity-40"
+                              title="Delete image"
+                            >
+                              {deletingId ===
+                              image.propertyImageId ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-3.5 w-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

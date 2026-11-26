@@ -10,7 +10,9 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import api from "../../api/axios";
 import { getProperties, type Property } from "../../api/properties.api";
+import { getPropertyImages } from "../../api/propertyImages.api";
 
 const PAGE_SIZE = 9;
 const PROPERTY_TYPES = ["All", "PG", "Hostel", "Apartment"] as const;
@@ -25,9 +27,24 @@ function formatError(error: any) {
   );
 }
 
+function getApiOrigin(): string {
+  const baseUrl = api.defaults?.baseURL || "http://192.168.1.31:5100";
+  return baseUrl.replace(/\/api\/?$/, "").replace(/\/$/, "");
+}
+
+function buildImageUrl(imageUrl?: string | null): string | null {
+  if (!imageUrl || typeof imageUrl !== "string") return null;
+  const trimmed = imageUrl.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  const normalizedPath = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  return `${getApiOrigin()}${normalizedPath}`;
+}
+
 export default function Properties() {
   const navigate = useNavigate();
   const [properties, setProperties] = useState<Property[]>([]);
+  const [propertyImages, setPropertyImages] = useState<Record<string, string>>({});
   const [search, setSearch] = useState("");
   const [propertyType, setPropertyType] = useState<PropertyTypeFilter>("All");
   const [page, setPage] = useState(1);
@@ -46,13 +63,33 @@ export default function Properties() {
         page: currentPage,
         pageSize: PAGE_SIZE,
       });
-      setProperties(data.items ?? []);
+      const items = data.items ?? [];
+      setProperties(items);
       setTotalPages(Math.max(data.totalPages || 1, 1));
       setTotalCount(data.totalCount ?? 0);
+
+      const results = await Promise.all(
+        items.map(async (item) => {
+          try {
+            const imgs = await getPropertyImages(item.propertyId);
+            const url = buildImageUrl(imgs?.[0]?.imageUrl);
+            return [item.propertyId, url] as const;
+          } catch {
+            return [item.propertyId, null] as const;
+          }
+        })
+      );
+
+      const nextImages: Record<string, string> = {};
+      for (const [id, url] of results) {
+        if (url) nextImages[id] = url;
+      }
+      setPropertyImages(nextImages);
     } catch (err) {
       console.error(err);
       setError(formatError(err));
       setProperties([]);
+      setPropertyImages({});
     } finally {
       setLoading(false);
     }
@@ -229,6 +266,7 @@ export default function Properties() {
                 <PropertyCard
                   key={property.propertyId}
                   property={property}
+                  bgImage={propertyImages[property.propertyId] ?? null}
                   onClick={() => navigate(`/properties/${property.propertyId}`)}
                 />
               ))}
@@ -269,73 +307,126 @@ export default function Properties() {
 
 function PropertyCard({
   property,
+  bgImage,
   onClick,
 }: {
   property: Property;
+  bgImage: string | null;
   onClick: () => void;
 }) {
   const occupancy = property.totalBeds > 0
     ? Math.round((property.occupiedBeds / property.totalBeds) * 100)
     : 0;
   const vacantBeds = Math.max(property.totalBeds - property.occupiedBeds, 0);
+  const hasImage = Boolean(bgImage);
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className="group w-full rounded-xl border border-[#E3E6DE] bg-white p-5 text-left shadow-sm transition duration-200 hover:border-[#C7D3C7] hover:shadow focus:outline-none focus:ring-4 focus:ring-[#DDE8DE]"
+      style={
+        bgImage
+          ? {
+              backgroundImage: `url("${bgImage}")`,
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+            }
+          : undefined
+      }
+      className={`group relative w-full overflow-hidden rounded-xl border p-5 text-left shadow-sm transition duration-200 focus:outline-none focus:ring-4 focus:ring-[#DDE8DE] ${
+        hasImage
+          ? "border-[#2A3B32] bg-[#16261E] text-white hover:border-[#4D6B5B] hover:shadow-md"
+          : "border-[#E3E6DE] bg-white text-[#2C4136] hover:border-[#C7D3C7] hover:shadow"
+      }`}
     >
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#1D4435] text-white">
-          <Building2 className="h-4 w-4" />
-        </div>
-        <span className="rounded-md bg-[#F2F4EC] px-2.5 py-1 text-[9px] font-medium uppercase tracking-wider text-[#55755A]">
-          {property.propertyType}
-        </span>
-      </div>
+      {hasImage && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/85 via-black/60 to-black/35 transition-opacity duration-200 group-hover:from-black/90 group-hover:via-black/65"
+        />
+      )}
 
-      <div className="mt-4">
-        <h2 className="truncate text-sm font-medium text-[#294436] group-hover:text-[#356248]">
-          {property.propertyName}
-        </h2>
-        <div className="mt-1 flex items-start gap-1 text-xs text-[#859083]">
-          <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#7D887D]" />
-          <span className="line-clamp-2">{property.city}</span>
+      <div className="relative z-10">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#1D4435] text-white">
+            <Building2 className="h-4 w-4" />
+          </div>
+          <span
+            className={`rounded-md px-2.5 py-1 text-[9px] font-medium uppercase tracking-wider ${
+              hasImage
+                ? "bg-white/15 text-white backdrop-blur-sm"
+                : "bg-[#F2F4EC] text-[#55755A]"
+            }`}
+          >
+            {property.propertyType}
+          </span>
         </div>
-      </div>
 
-      <div className="mt-4 grid grid-cols-3 gap-2">
-        <MiniStat label="Rooms" value={property.totalRooms} />
-        <MiniStat label="Beds" value={property.totalBeds} />
-        <MiniStat label="Vacant" value={vacantBeds} />
-      </div>
-
-      <div className="mt-4 border-t border-[#EEF0E9] pt-3">
-        <div className="flex items-center justify-between text-[10px]">
-          <span className="text-[#889184]">Occupancy</span>
-          <span className="font-medium text-[#36503C]">{occupancy}%</span>
+        <div className="mt-4">
+          <h2
+            className={`truncate text-sm font-medium ${
+              hasImage ? "text-white group-hover:text-emerald-200" : "text-[#294436] group-hover:text-[#356248]"
+            }`}
+          >
+            {property.propertyName}
+          </h2>
+          <div className={`mt-1 flex items-start gap-1 text-xs ${hasImage ? "text-white/80" : "text-[#859083]"}`}>
+            <MapPin className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${hasImage ? "text-emerald-300" : "text-[#7D887D]"}`} />
+            <span className="line-clamp-2">{property.city}</span>
+          </div>
         </div>
-        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-[#E8EAE0]">
-          <div
-            className="h-full rounded-full bg-[#356248] transition-all duration-500"
-            style={{ width: `${occupancy}%` }}
-          />
-        </div>
-      </div>
 
-      <div className="mt-4 flex items-center justify-between text-[10px] font-medium text-[#678471]">
-        <span>Open property</span>
-        <span className="text-[#356248] transition-transform group-hover:translate-x-0.5">View details →</span>
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          <MiniStat label="Rooms" value={property.totalRooms} hasImage={hasImage} />
+          <MiniStat label="Beds" value={property.totalBeds} hasImage={hasImage} />
+          <MiniStat label="Vacant" value={vacantBeds} hasImage={hasImage} />
+        </div>
+
+        <div className={`mt-4 border-t pt-3 ${hasImage ? "border-white/15" : "border-[#EEF0E9]"}`}>
+          <div className="flex items-center justify-between text-[10px]">
+            <span className={hasImage ? "text-white/75" : "text-[#889184]"}>Occupancy</span>
+            <span className={`font-medium ${hasImage ? "text-white" : "text-[#36503C]"}`}>{occupancy}%</span>
+          </div>
+          <div className={`mt-1.5 h-1.5 overflow-hidden rounded-full ${hasImage ? "bg-white/20" : "bg-[#E8EAE0]"}`}>
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${hasImage ? "bg-emerald-400" : "bg-[#356248]"}`}
+              style={{ width: `${occupancy}%` }}
+            />
+          </div>
+        </div>
+
+        <div className={`mt-4 flex items-center justify-between text-[10px] font-medium ${hasImage ? "text-white/85" : "text-[#678471]"}`}>
+          <span>Open property</span>
+          <span className={`transition-transform group-hover:translate-x-0.5 ${hasImage ? "text-emerald-300" : "text-[#356248]"}`}>
+            View details →
+          </span>
+        </div>
       </div>
     </button>
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: number }) {
+function MiniStat({
+  label,
+  value,
+  hasImage,
+}: {
+  label: string;
+  value: number;
+  hasImage: boolean;
+}) {
   return (
-    <div className="rounded-lg border border-[#E4E8DE] bg-[#F7F6F0]/60 p-2.5">
-      <p className="text-[9px] font-medium uppercase tracking-wider text-[#859083]">{label}</p>
-      <p className="mt-0.5 text-sm font-medium text-[#263F33]">{value}</p>
+    <div
+      className={`rounded-lg border p-2.5 ${
+        hasImage
+          ? "border-white/15 bg-black/35 text-white backdrop-blur-sm"
+          : "border-[#E4E8DE] bg-[#F7F6F0]/60 text-[#263F33]"
+      }`}
+    >
+      <p className={`text-[9px] font-medium uppercase tracking-wider ${hasImage ? "text-white/70" : "text-[#859083]"}`}>
+        {label}
+      </p>
+      <p className={`mt-0.5 text-sm font-medium ${hasImage ? "text-white" : "text-[#263F33]"}`}>{value}</p>
     </div>
   );
 }

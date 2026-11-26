@@ -4,28 +4,43 @@ import { Activity, BedDouble, Building2, Users, UserRound, ShieldCheck } from "l
 import { saApi, saError } from "../api";
 
 const metrics = [
-  ["Total clients", "TotalClients", Users], 
-  ["Active clients", "ActiveClients", UserRound],
-  ["Trial clients", "TrialClients", Activity], 
-  ["Suspended clients", "SuspendedClients", ShieldCheck],
-  ["Properties", "TotalProperties", Building2], 
-  ["Rooms", "TotalRooms", BedDouble],
-  ["Active tenants", "TotalTenants", Users], 
-  ["Staff", "TotalStaff", UserRound],
+  ["Total clients", "totalClients", "TotalClients", Users],
+  ["Active clients", "activeClients", "ActiveClients", UserRound],
+  ["Trial clients", "trialClients", "TrialClients", Activity],
+  ["Suspended clients", "suspendedClients", "SuspendedClients", ShieldCheck],
+  ["Properties", "totalProperties", "TotalProperties", Building2],
+  ["Rooms", "totalRooms", "TotalRooms", BedDouble],
+  ["Active tenants", "totalTenants", "TotalTenants", Users],
+  ["Staff", "totalStaff", "TotalStaff", UserRound],
 ] as const;
+
+const getNum = (obj: any, camel: string, pascal: string) =>
+  Number(obj?.[camel] ?? obj?.[pascal] ?? 0);
 
 export default function Dashboard() {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    saApi.dashboard().then(setData).catch(e => setError(saError(e)));
+    saApi
+      .dashboard()
+      .then((res) => setData(res?.data ?? res))
+      .catch((e) => setError(saError(e)));
   }, []);
 
   if (error) return <div className="sa-error">{error}</div>;
   if (!data) return <div className="sa-loading">Loading platform overview…</div>;
 
-  const total = Math.max(data.TotalClients || 0, 1);
+  const totalClients = getNum(data, "totalClients", "TotalClients");
+  const total = Math.max(totalClients, 1);
+
+  const statusRows = [
+    ["Active", getNum(data, "activeClients", "ActiveClients"), "#356248"],
+    ["Trial", getNum(data, "trialClients", "TrialClients"), "#9B712F"],
+    ["Suspended", getNum(data, "suspendedClients", "SuspendedClients"), "#A2634B"],
+    ["Expired", getNum(data, "expiredClients", "ExpiredClients"), "#7D887D"],
+    ["Cancelled", getNum(data, "cancelledClients", "CancelledClients"), "#5C7180"],
+  ] as const;
 
   return (
     <>
@@ -38,15 +53,15 @@ export default function Dashboard() {
       </div>
 
       <div className="sa-stats">
-        {metrics.map(([label, key, Icon]) => (
-          <div className="sa-card sa-stat" key={key}>
+        {metrics.map(([label, camelKey, pascalKey, Icon]) => (
+          <div className="sa-card sa-stat" key={camelKey}>
             <div className="sa-stat-top">
               {label}
               <span className="sa-stat-icon">
                 <Icon size={16} />
               </span>
             </div>
-            <strong>{data[key] ?? 0}</strong>
+            <strong>{getNum(data, camelKey, pascalKey)}</strong>
             <small>Across RoomEase platform</small>
           </div>
         ))}
@@ -57,13 +72,7 @@ export default function Dashboard() {
           <h3>Subscription health</h3>
           <p className="sa-panel-sub">Accounts by current subscription status</p>
           <div className="sa-status-list">
-            {[
-              ["Active", data.ActiveClients, "#356248"],
-              ["Trial", data.TrialClients, "#9B712F"],
-              ["Suspended", data.SuspendedClients, "#A2634B"],
-              ["Expired", data.ExpiredClients, "#7D887D"],
-              ["Cancelled", data.CancelledClients, "#5C7180"]
-            ].map(([label, value, color]: any) => (
+            {statusRows.map(([label, value, color]) => (
               <div className="sa-status-line" key={label}>
                 <span>{label}</span>
                 <span className="sa-track">
